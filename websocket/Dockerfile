@@ -36,6 +36,10 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /app
 
+# apt 默认查询 _http._tcp 的 SRV，会改连 debian.map.fastlydns.net。
+# 该名称在当前网络会被解析到 198.18.0.1 并返回 HTTP 500；直接请求 deb.debian.org 仍然成功。
+# 关闭 SRV 后仍使用 sources 里的主机名，签名和 TLS 校验保持不变。
+RUN printf '%s\n' 'Acquire::EnableSrvRecords "false";' > /etc/apt/apt.conf.d/99disable-srv-records
 RUN apt-get update && apt-get install -y curl ca-certificates gcc \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
