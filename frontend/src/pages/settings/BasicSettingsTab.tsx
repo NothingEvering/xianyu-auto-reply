@@ -83,6 +83,13 @@ export function BasicSettingsTab({
               onChange={(checked) => setSettings((current) => current ? { ...current, 'account.face_verify_timeout_disable': checked } : null)}
               className="md:col-span-2"
             />
+            <ToggleSetting
+              title="仅保存登录"
+              description="开启后，扫码、密码、导入和重新登录只保存凭据，账号保持禁用，不启动自动回复或订单任务。需要自动处理时，先启动 WebSocket 服务，再在账号管理中手动启用账号。关闭后恢复登录即启用并启动任务。"
+              checked={Boolean(settings?.['account.login_save_only'] ?? true)}
+              onChange={(checked) => setSettings((current) => current ? { ...current, 'account.login_save_only': checked } : null)}
+              className="md:col-span-2"
+            />
           </div>
 
           <PasswordLoginModeSetting

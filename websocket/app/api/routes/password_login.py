@@ -57,6 +57,7 @@ class LoginStatusResponse(BaseModel):
     qr_code_url: Optional[str] = None
     account_id: Optional[str] = None
     is_new_account: Optional[bool] = None
+    tasks_started: Optional[bool] = None
     cookie_count: Optional[int] = None
     error: Optional[str] = None
 
@@ -326,7 +327,6 @@ def _save_login_result(
     from common.core.config import BaseConfig
     from common.models.xy_account import XYAccount
     from common.services.account_limit_service import AccountLimitExceededError, AccountLimitService
-    from common.utils.cookie_refresh import clear_cookie_refresh_snapshot
     from common.utils.xianyu_utils import trans_cookies
     
     try:
@@ -356,25 +356,44 @@ def _save_login_result(
                     beijing_tz = timezone(timedelta(hours=8))
                     now = datetime.now(beijing_tz)
                     
+                    from common.login_save_only import (
+                        apply_saved_login_state,
+                        assign_login_persistence,
+                        read_login_save_only,
+                    )
+
+                    save_only = await read_login_save_only(session)
                     if existing_account:
-                        # 更新现有账号
+                        # 更新现有账号。仅保存登录时不把旧的 active 状态写回。
+                        previous_status = existing_account.status
+                        previous_reason = existing_account.disable_reason
                         existing_account.cookie = cookies_str
-                        existing_account.metadata_json = clear_cookie_refresh_snapshot(existing_account.metadata_json)
+                        assign_login_persistence(
+                            existing_account,
+                            save_only=save_only,
+                            previous_status=previous_status,
+                            previous_disable_reason=previous_reason,
+                        )
                         existing_account.username = account
                         existing_account.login_password = password
                         existing_account.show_browser = show_browser
                         existing_account.login_method = 'password'
-                        existing_account.status = 'active'
-                        existing_account.disable_reason = None  # 清空禁用原因
                         existing_account.last_login_at = now
                         if unb:
                             existing_account.unb = unb
                         session.add(existing_account)
                         is_new_account = False
-                        logger.info(f"【{account_id}】现有账号Cookie和账号密码已更新")
+                        saved_status = existing_account.status
+                        logger.info(f"【{account_id}】现有账号Cookie和账号密码已更新，状态={saved_status}")
                     else:
                         # 创建新账号
                         await AccountLimitService(session).ensure_can_add_account(user_id)
+                        saved_status, reason, metadata = apply_saved_login_state(
+                            save_only=save_only,
+                            previous_status=None,
+                            previous_disable_reason=None,
+                            metadata=None,
+                        )
                         new_account = XYAccount(
                             owner_id=user_id,
                             account_id=account_id,
@@ -383,7 +402,9 @@ def _save_login_result(
                             login_password=password,
                             show_browser=show_browser,
                             login_method='password',
-                            status='active',
+                            status=saved_status,
+                            disable_reason=reason,
+                            metadata_json=metadata,
                             auto_confirm=False,
                             pause_duration=10,
                             unb=unb,
@@ -391,7 +412,7 @@ def _save_login_result(
                         )
                         session.add(new_account)
                         is_new_account = True
-                        logger.info(f"【{account_id}】新账号Cookie和账号密码已保存")
+                        logger.info(f"【{account_id}】新账号Cookie和账号密码已保存，状态={saved_status}")
                     
                     # 密码登录成功，标记该账号Token缓存失效（新Cookie需要重新获取Token）
                     if unb:
@@ -412,7 +433,7 @@ def _save_login_result(
                     
                     await session.commit()
                     
-                    return is_new_account
+                    return is_new_account, saved_status
             
             async def save_to_db():
                 # 一次性事件循环内的临时引擎：仅需极小连接池，并加连接超时；
@@ -434,28 +455,35 @@ def _save_login_result(
                 finally:
                     await engine.dispose()
             
-            is_new_account = new_loop.run_until_complete(save_to_db())
+            is_new_account, saved_status = new_loop.run_until_complete(save_to_db())
             
-            # 启动WebSocket连接任务
+            # 按入库后的状态决定是否启动连接。仅保存登录不会发消息。
+            from common.login_save_only import task_action_after_login
+
+            action = task_action_after_login(status=saved_status, created=is_new_account)
             try:
                 from app.services.xianyu.cookie_manager import get_manager
+
                 manager = get_manager()
-                if manager:
-                    if is_new_account:
-                        manager.add_cookie(account_id, cookies_str, user_id)
-                        logger.info(f"【{account_id}】新账号已添加到CookieManager并启动WebSocket")
-                    else:
-                        manager.update_cookie(account_id, cookies_str, user_id)
-                        logger.info(f"【{account_id}】现有账号Cookie已更新并重启WebSocket")
+                if manager and action == "start":
+                    manager.add_cookie(account_id, cookies_str, user_id)
+                    logger.info(f"【{account_id}】新账号已添加到CookieManager并启动WebSocket")
+                elif manager and action == "restart":
+                    manager.update_cookie(account_id, cookies_str, user_id)
+                    logger.info(f"【{account_id}】现有账号Cookie已更新并重启WebSocket")
+                elif manager and action == "stop":
+                    manager.remove_cookie(account_id)
+                    logger.info(f"【{account_id}】仅保存登录：已停止账号任务，未重新启动")
                 else:
-                    logger.warning(f"【{account_id}】CookieManager未初始化，无法启动WebSocket")
+                    logger.info(f"【{account_id}】仅保存登录：凭据已保存，不启动WebSocket")
             except Exception as ws_e:
-                logger.error(f"【{account_id}】启动WebSocket任务失败: {str(ws_e)}")
+                logger.error(f"【{account_id}】同步账号任务状态失败: {str(ws_e)}")
             
             # 更新会话状态
             password_login_sessions[session_id]['status'] = 'success'
             password_login_sessions[session_id]['account_id'] = account_id
             password_login_sessions[session_id]['is_new_account'] = is_new_account
+            password_login_sessions[session_id]['tasks_started'] = action in {"start", "restart"}
             password_login_sessions[session_id]['cookie_count'] = len(cookies_dict)
             
         finally:
@@ -583,11 +611,17 @@ async def check_login_status(session_id: str):
                 message="需要人脸验证，请查看验证截图" if session_data.get("screenshot_path") else "需要人脸验证，请点击验证链接"
             )
         elif status == "success":
+            tasks_started = bool(session_data.get("tasks_started"))
             result = LoginStatusResponse(
                 status="success",
-                message=f"账号 {session_data['account_id']} 登录成功",
+                message=(
+                    f"账号 {session_data['account_id']} 登录成功"
+                    if tasks_started
+                    else f"账号 {session_data['account_id']} 已保存，尚未启用"
+                ),
                 account_id=session_data["account_id"],
                 is_new_account=session_data.get("is_new_account", False),
+                tasks_started=tasks_started,
                 cookie_count=session_data.get("cookie_count", 0)
             )
             del password_login_sessions[session_id]

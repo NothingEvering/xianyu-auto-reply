@@ -319,6 +319,8 @@ export interface SystemSettings {
   'log.retention_days'?: string
   // 账号安全设置
   'account.face_verify_timeout_disable'?: boolean
+  // 仅保存登录：true 时登录/导入不启用账号、不启动自动任务
+  'account.login_save_only'?: boolean
   // 账号密码登录方式
   'password_login.mode'?: PasswordLoginMode
   'password_login.remote_url'?: string

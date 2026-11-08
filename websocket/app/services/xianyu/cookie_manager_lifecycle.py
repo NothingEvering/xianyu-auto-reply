@@ -8,6 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.db.session import async_session_maker
+from common.login_save_only import (
+    is_account_enabled_for_tasks,
+    select_startup_cookie_ids,
+    should_schedule_startup_task,
+)
 from common.models import XYAccount
 
 
@@ -31,7 +36,7 @@ class CookieManagerLifecycle:
                 if cookie_id in self.cookies:
                     logger.warning(f"检测到重复账号ID: {cookie_id}，将使用最新加载的记录覆盖内存状态")
                 self.cookies[cookie_id] = account.cookie or ""
-                self.cookie_status[cookie_id] = account.status == "active"
+                self.cookie_status[cookie_id] = is_account_enabled_for_tasks(account.status)
                 self.user_ids[cookie_id] = account.owner_id
                 self.auto_confirm_settings[cookie_id] = account.auto_confirm
                 self.keywords.setdefault(cookie_id, [])
@@ -47,11 +52,15 @@ class CookieManagerLifecycle:
 
     async def start_all_tasks(self):
         """按快照逐个调度启用账号，并重新检查状态以兼容启动期间的账号操作。"""
-        cookie_ids = [key for key, enabled in self.cookie_status.items() if enabled]
+        cookie_ids = select_startup_cookie_ids(self.cookie_status)
         self.startup_total = len(cookie_ids)
         self.startup_processed = 0
         for cookie_id in cookie_ids:
-            if self.cookie_status.get(cookie_id, False) and cookie_id in self.cookies:
+            if should_schedule_startup_task(
+                cookie_id,
+                cookie_status=self.cookie_status,
+                cookies=self.cookies,
+            ):
                 await self._add_cookie_async(
                     cookie_id, self.cookies[cookie_id], self.user_ids.get(cookie_id),
                     restart_existing=False,

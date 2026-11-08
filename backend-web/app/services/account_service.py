@@ -14,6 +14,12 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.login_save_only import (
+    LOGIN_SAVE_ONLY_META_KEY,
+    assign_login_persistence,
+    apply_saved_login_state,
+    read_login_save_only,
+)
 from common.services.account_limit_service import AccountLimitService
 from common.models.xy_account import XYAccount
 from common.models.user import User
@@ -325,6 +331,12 @@ class AccountService:
         result = await self.session.execute(stmt)
         return (result.scalar() or 0) > 0
 
+    async def _resolve_login_save_only(self, save_only: bool | None) -> bool:
+        """未显式传入时读取系统设置；没有配置时按仅保存登录处理。"""
+        if save_only is not None:
+            return save_only
+        return await read_login_save_only(self.session)
+
     async def create_account(
         self,
         owner_id: int,
@@ -333,19 +345,29 @@ class AccountService:
         *,
         unb: str | None = None,
         login_method: str = "manual",
+        save_only: bool | None = None,
     ) -> XYAccount:
         # 全局唯一校验：account_id 不允许与任何用户的账号重复
         if await self.account_id_exists(account_id):
             raise ValueError("账号ID已存在")
 
         await AccountLimitService(self.session).ensure_can_add_account(owner_id)
+        save_only = await self._resolve_login_save_only(save_only)
+        status, reason, metadata = apply_saved_login_state(
+            save_only=save_only,
+            previous_status=None,
+            previous_disable_reason=None,
+            metadata=None,
+        )
 
         account = XYAccount(
             owner_id=owner_id,
             account_id=account_id,
             cookie=cookie_value,
             login_method=login_method,
-            status="active",
+            status=status,
+            disable_reason=reason,
+            metadata_json=metadata,
             auto_confirm=False,
             pause_duration=10,
             show_browser=False,
@@ -374,6 +396,10 @@ class AccountService:
         account.status = "active" if enabled else "disabled"
         # 启用时清空禁用原因，禁用时设置禁用原因
         account.disable_reason = None if enabled else disable_reason
+        if enabled and isinstance(account.metadata_json, dict) and LOGIN_SAVE_ONLY_META_KEY in account.metadata_json:
+            metadata = dict(account.metadata_json)
+            metadata.pop(LOGIN_SAVE_ONLY_META_KEY, None)
+            account.metadata_json = metadata or None
         self.session.add(account)
         await self.session.commit()
 
@@ -471,17 +497,24 @@ class AccountService:
         unb: str | None,
         *,
         login_method: str = "qr_scan",
+        save_only: bool | None = None,
     ) -> tuple[XYAccount, bool]:
         account: XYAccount | None = None
         if unb:
             account = await self.get_account_by_unb(owner_id, unb)
 
         created = False
+        save_only = await self._resolve_login_save_only(save_only)
         if account:
+            previous_status = account.status
+            previous_reason = account.disable_reason
             account.cookie = cookies
-            account.metadata_json = clear_cookie_refresh_snapshot(account.metadata_json)
-            account.status = "active"
-            account.disable_reason = None  # 清空禁用原因
+            assign_login_persistence(
+                account,
+                save_only=save_only,
+                previous_status=previous_status,
+                previous_disable_reason=previous_reason,
+            )
             account.login_method = login_method
             account.unb = unb
             account.last_login_at = datetime.now(tz=UTC)
@@ -491,12 +524,20 @@ class AccountService:
             await AccountLimitService(self.session).ensure_can_add_account(owner_id)
             base_id = unb or f"qr_{int(datetime.utcnow().timestamp())}"
             new_id = await self._generate_unique_account_id(owner_id, base_id)
+            status, reason, metadata = apply_saved_login_state(
+                save_only=save_only,
+                previous_status=None,
+                previous_disable_reason=None,
+                metadata=None,
+            )
             account = XYAccount(
                 owner_id=owner_id,
                 account_id=new_id,
                 cookie=cookies,
                 login_method=login_method,
-                status="active",
+                status=status,
+                disable_reason=reason,
+                metadata_json=metadata,
                 auto_confirm=False,
                 pause_duration=10,
                 show_browser=False,
@@ -523,6 +564,7 @@ class AccountService:
         cookies: str,
         unb: str | None,
         show_browser: bool = False,
+        save_only: bool | None = None,
     ) -> tuple[XYAccount, bool]:
         """协议化账号密码登录成功后保存账号（按前端传入的 account_id upsert）。
 
@@ -549,15 +591,21 @@ class AccountService:
 
         now = datetime.now(tz=UTC)
         created = False
+        save_only = await self._resolve_login_save_only(save_only)
         if existing:
+            previous_status = existing.status
+            previous_reason = existing.disable_reason
             existing.cookie = cookies
-            existing.metadata_json = clear_cookie_refresh_snapshot(existing.metadata_json)
+            assign_login_persistence(
+                existing,
+                save_only=save_only,
+                previous_status=previous_status,
+                previous_disable_reason=previous_reason,
+            )
             existing.username = account
             existing.login_password = password
             existing.show_browser = show_browser
             existing.login_method = "password"
-            existing.status = "active"
-            existing.disable_reason = None
             existing.last_login_at = now
             if unb:
                 existing.unb = unb
@@ -566,6 +614,12 @@ class AccountService:
             account_obj = existing
         else:
             await AccountLimitService(self.session).ensure_can_add_account(owner_id)
+            status, reason, metadata = apply_saved_login_state(
+                save_only=save_only,
+                previous_status=None,
+                previous_disable_reason=None,
+                metadata=None,
+            )
             account_obj = XYAccount(
                 owner_id=owner_id,
                 account_id=account_id,
@@ -574,7 +628,9 @@ class AccountService:
                 login_password=password,
                 show_browser=show_browser,
                 login_method="password",
-                status="active",
+                status=status,
+                disable_reason=reason,
+                metadata_json=metadata,
                 auto_confirm=False,
                 pause_duration=10,
                 unb=unb,

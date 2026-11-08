@@ -313,7 +313,10 @@ class CookiesRefreshTaskService:
         enabled_count = 0
         processed_count = 0
 
+        from common.login_save_only import auto_enable_after_refresh_allowed, read_login_save_only
+
         async with async_session_maker() as session:
+            save_only = await read_login_save_only(session)
             accounts = await self._get_eligible_accounts(session)
             active_count = sum(1 for a in accounts if not self._is_disabled_account(a))
             disabled_count = len(accounts) - active_count
@@ -325,6 +328,15 @@ class CookiesRefreshTaskService:
             for account in accounts:
                 is_disabled = self._is_disabled_account(account)
                 try:
+                    # 仅保存登录时，禁用账号不续期、不改回启用、不启动任务。
+                    if is_disabled and not auto_enable_after_refresh_allowed(save_only=save_only):
+                        skipped_count += 1
+                        logger.info(
+                            f"【{self.task_name}】仅保存登录：跳过禁用账号 {account.account_id}，"
+                            "不续期、不启用、不启动任务"
+                        )
+                        continue
+
                     # 禁用账号：检查是否连续失败达到阈值
                     if is_disabled:
                         should_skip = await self._check_consecutive_failures(
@@ -344,8 +356,8 @@ class CookiesRefreshTaskService:
                         initialized_count += 1
                     elif result.status == "success":
                         success_count += 1
-                        # 禁用账号续期成功 -> 自动启用
-                        if is_disabled:
+                        # 禁用账号续期成功 -> 自动启用（仅保存登录关闭时）
+                        if is_disabled and auto_enable_after_refresh_allowed(save_only=save_only):
                             await self._enable_account_after_refresh(session, account)
                             enabled_count += 1
                     elif result.status == "failed":

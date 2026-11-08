@@ -1,7 +1,8 @@
 """
 二维码扫码登录路由
 
-提供二维码生成、状态查询和Cookie获取接口
+提供二维码生成、状态查询和Cookie获取接口。
+登录成功只按仅保存登录策略入库，不在该模式下启动或重启账号任务。
 """
 from __future__ import annotations
 
@@ -13,9 +14,10 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
-from app.core.http_client import get_http_client
 from app.services.account_service import AccountService
+from app.services.login_task_dispatch import dispatch_login_task
 from app.services.qr_login import qr_login_manager
+from common.login_save_only import task_action_after_login
 from app.api.deps import get_db_session as get_db
 from common.models.user import User
 from common.schemas.common import ApiResponse
@@ -60,6 +62,8 @@ def _build_processed_response(processed_info: dict) -> ApiResponse:
             "account_info": {
                 "account_id": processed_info.get("account_id"),
                 "is_new_account": bool(processed_info.get("is_new_account", False)),
+                "status": processed_info.get("account_status"),
+                "tasks_started": processed_info.get("tasks_started"),
             },
         },
     )
@@ -181,58 +185,44 @@ async def get_qr_status(
                     logger.info(
                         f"扫码登录：{'创建新账号' if is_new_account else '更新现有账号'} {account.account_id}"
                     )
+
+                    action = task_action_after_login(status=account.status, created=is_new_account)
+                    response = await dispatch_login_task(
+                        account.account_id,
+                        action,
+                        cookie=cookies_str,
+                        user_id=owner_id,
+                    )
+                    if action == "none":
+                        logger.info(f"扫码登录：账号已保存且保持禁用 {account.account_id}")
+                    elif response.get("success"):
+                        logger.info(f"扫码登录：账号任务{action}完成 {account.account_id}")
+                    else:
+                        logger.warning(
+                            f"扫码登录：账号任务{action}失败 {account.account_id}: {response.get('message')}"
+                        )
                     
-                    # 调用 WebSocket 服务启动账号任务
-                    try:
-                        from app.core.config import get_settings
-                        settings = get_settings()
-                        client = get_http_client()
-                        
-                        # 构建请求参数
-                        request_data = {
-                            "cookie_value": cookies_str,
-                            "user_id": owner_id
-                        }
-                        
-                        if is_new_account:
-                            # 新账号：启动任务
-                            response = await client.post(
-                                f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/start",
-                                json=request_data
-                            )
-                            if response.get("success"):
-                                logger.info(f"扫码登录：新账号WebSocket任务已启动 {account.account_id}")
-                            else:
-                                logger.warning(f"扫码登录：启动WebSocket任务失败 {account.account_id}: {response.get('message')}")
-                        else:
-                            # 现有账号：重启任务
-                            response = await client.post(
-                                f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/restart",
-                                json=request_data
-                            )
-                            if response.get("success"):
-                                logger.info(f"扫码登录：现有账号WebSocket任务已重启 {account.account_id}")
-                            else:
-                                logger.warning(f"扫码登录：重启WebSocket任务失败 {account.account_id}: {response.get('message')}")
-                    except Exception as ws_e:
-                        logger.error(f"扫码登录：调用WebSocket服务失败 {account.account_id}: {str(ws_e)}")
-                    
+                    tasks_started = action in {"start", "restart"}
                     # 记录已处理
                     PROCESSED_SESSIONS[session_id] = {
                         "account_id": account.account_id,
                         "is_new_account": is_new_account,
+                        "account_status": account.status,
+                        "tasks_started": tasks_started,
                     }
                     
                     _cleanup_session(session_id)
                     
                     return ApiResponse(
                         success=True,
-                        message="扫码登录成功",
+                        message="扫码登录已保存，账号保持禁用" if not tasks_started else "扫码登录成功",
                         data={
                             "status": "success",
                             "account_info": {
                                 "account_id": account.account_id,
                                 "is_new_account": is_new_account,
+                                "status": account.status,
+                                "tasks_started": tasks_started,
                             }
                         }
                     )
