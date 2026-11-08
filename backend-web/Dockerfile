@@ -6,13 +6,53 @@ FROM python:3.11-slim
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# 配置国内镜像源
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+# 默认保留基础镜像中的 Debian 软件源和 Signed-By 签名校验。
+# 官方源不可达时才覆盖主机名，例如 --build-arg APT_MIRROR=mirrors.ustc.edu.cn。
+# 只接受主机名，不接受 trusted=yes 或其它 apt 选项。
+ARG APT_MIRROR=
+RUN set -eu; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      case "${APT_MIRROR}" in \
+        *[!A-Za-z0-9.-]*|-*|*-|*..*|.*) \
+          echo "APT_MIRROR must be a hostname, not an apt option" >&2; \
+          exit 1 ;; \
+      esac; \
+      changed=0; \
+      for sources in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        if [ -f "${sources}" ]; then \
+          sed -i \
+            -e "s|https://deb.debian.org|https://${APT_MIRROR}|g" \
+            -e "s|http://deb.debian.org|http://${APT_MIRROR}|g" \
+            "${sources}"; \
+          changed=1; \
+        fi; \
+      done; \
+      if [ "${changed}" -ne 1 ]; then \
+        echo "Debian apt source file not found" >&2; \
+        exit 1; \
+      fi; \
+    fi
+# 留空则使用 pip 默认的 https://pypi.org/simple，保留 TLS 校验，不设置 trusted-host。
+# 只有官方源不可达时才覆盖，例如 --build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=
+RUN set -eu; \
+    if [ -n "${PIP_INDEX_URL}" ]; then \
+      case "${PIP_INDEX_URL}" in \
+        https://*) ;; \
+        *) echo "PIP_INDEX_URL must use https" >&2; exit 1 ;; \
+      esac; \
+      case "${PIP_INDEX_URL}" in \
+        *trusted-host*|*trusted_host*) echo "PIP_INDEX_URL must not disable TLS trust" >&2; exit 1 ;; \
+      esac; \
+      pip config set global.index-url "${PIP_INDEX_URL}"; \
+    fi
 
 WORKDIR /app
 
+# apt 默认查询 _http._tcp 的 SRV，会改连 debian.map.fastlydns.net。
+# 该名称在当前网络会被解析到 198.18.0.1 并返回 HTTP 500；直接请求 deb.debian.org 仍然成功。
+# 关闭 SRV 后仍使用 sources 里的主机名，签名和 TLS 校验保持不变。
+RUN printf '%s\n' 'Acquire::EnableSrvRecords "false";' > /etc/apt/apt.conf.d/99disable-srv-records
 RUN apt-get update && apt-get install -y curl ca-certificates gcc \
     fonts-dejavu-core fonts-liberation \
     && update-ca-certificates \

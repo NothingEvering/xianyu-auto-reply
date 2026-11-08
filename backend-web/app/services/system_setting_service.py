@@ -13,6 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.login_save_only import LOGIN_SAVE_ONLY_SETTING_KEY, parse_login_save_only
 from common.models.system_setting import SystemSetting
 from common.services.advertisement_types import AD_PRICE_DEFAULTS, parse_ad_price
 from app.services.payment_config_service import PAYMENT_SETTING_DEFAULTS
@@ -70,6 +71,10 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, tuple[str, str | None]] = {
     "theme.font_family": ("system", "系统主题字体预设"),
     "log.retention_days": ("7", "日志保留天数（所有模块生效，修改后实时刷新各服务日志策略）"),
     "account.face_verify_timeout_disable": ("true", "人脸验证超时是否自动禁用账号"),
+    LOGIN_SAVE_ONLY_SETTING_KEY: (
+        "true",
+        "仅保存登录：登录和导入只保存凭据，账号保持禁用，不启动自动任务",
+    ),
     # 代理设置：用于配置网络请求的代理 API URL 和启用开关
     # api_url 默认空字符串表示未配置；enabled 默认 false 表示不启用
     "proxy.api_url": ("", "代理 API 的 URL（可能较长，用于配置外部代理服务）"),
@@ -144,6 +149,7 @@ NO_ESCAPE_KEYS = {
     "withdraw.min_amount",
     "log.retention_days",
     "account.face_verify_timeout_disable",
+    LOGIN_SAVE_ONLY_SETTING_KEY,
     # 用户到期/续期设置：均为数字字符串，无需 XSS 转义
     "user.renew_month_price",
     "user.register_default_days",
@@ -238,6 +244,9 @@ class SystemSettingService:
         # Token获取方式：非法值统一回落到默认的网页接口
         settings[TOKEN_API_MODE_SETTING_KEY] = normalize_token_api_mode(
             settings.get(TOKEN_API_MODE_SETTING_KEY)
+        )
+        settings[LOGIN_SAVE_ONLY_SETTING_KEY] = (
+            "true" if parse_login_save_only(settings.get(LOGIN_SAVE_ONLY_SETTING_KEY)) else "false"
         )
         return settings
 

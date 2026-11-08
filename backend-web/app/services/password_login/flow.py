@@ -5,7 +5,7 @@
 1. 纯 API 调 login.do，对响应做四分支编排（滑块 / 直接成功 / 触发人脸 / 失败）
 2. 滑块委托：配了远程→远程直连；否则→委托 WebSocket 使用其配置的滑块引擎
 3. 人脸：复用 common 人脸链路，渲染二维码供前台展示，扫码后自动收 Cookie
-4. 成功后按 account_id 入库、起 WebSocket；滑块未通过时保持协议链路重试
+4. 成功后按 account_id 入库；仅保存登录开启时不启动 WebSocket。滑块未通过时保持协议链路重试
 
 会话状态：processing / verification_required / success / failed
 """
@@ -17,8 +17,6 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from loguru import logger
 
-from app.core.config import get_settings
-from app.core.http_client import get_http_client
 from app.services.account_service import AccountService
 from common.db.session import async_session_maker
 from common.services.remote_password_login_api import solve_remote_x5sec_login
@@ -110,11 +108,11 @@ async def _collect_login_cookies(client: httpx.AsyncClient) -> Tuple[str, str]:
 async def _save_and_start(
     *, account_id: str, account: str, password: str, show_browser: bool,
     owner_id: int, cookies_str: str, unb: str,
-) -> Tuple[bool, str]:
-    """入库（按 account_id upsert）+ 清 token 缓存 + 起/重启 WebSocket。
+) -> Tuple[bool, str, bool]:
+    """入库（按 account_id upsert）+ 清 token 缓存。仅保存登录关闭时才启动或重启 WebSocket。
 
     Returns:
-        (is_new_account, message) 或抛 ValueError（账号被占用）
+        (is_new_account, message, tasks_started) 或抛 ValueError（账号被占用）
     """
     async with async_session_maker() as session:
         svc = AccountService(session)
@@ -136,18 +134,25 @@ async def _save_and_start(
             if not invalidation.success:
                 logger.warning(f"【{account_id}】{invalidation.message}")
 
-    # 起/重启 WebSocket（与扫码登录同一套 /internal/accounts 接口）
-    try:
-        settings = get_settings()
-        client = get_http_client()
-        endpoint = "start" if is_new else "restart"
-        await client.post(
-            f"{settings.websocket_service_url}/internal/accounts/{account_id}/{endpoint}",
-            json={"cookie_value": cookies_str, "user_id": owner_id},
-        )
-    except Exception as ws_e:
-        logger.error(f"【{account_id}】协议登录成功但起 WebSocket 失败: {ws_e}")
-    return is_new, ("新账号登录成功" if is_new else "账号登录成功")
+    # 仅保存登录时不启动/重启连接；关闭该模式后仍走原来的 start/restart。
+    from app.services.login_task_dispatch import dispatch_login_task
+    from common.login_save_only import task_action_after_login
+
+    action = task_action_after_login(status=account_obj.status, created=is_new)
+    await dispatch_login_task(
+        account_id,
+        action,
+        cookie=cookies_str,
+        user_id=owner_id,
+    )
+    tasks_started = action in {"start", "restart"}
+    if not tasks_started:
+        message = "新账号已保存，未启用自动任务" if is_new else "账号已保存，未启用自动任务"
+    elif is_new:
+        message = "新账号登录成功"
+    else:
+        message = "账号登录成功"
+    return is_new, message, tasks_started
 
 
 def _inject_cookies(client: httpx.AsyncClient, cookies: Dict[str, str]) -> None:
@@ -327,7 +332,7 @@ async def _finish_success(
 ) -> None:
     """成功收尾：入库 + 起 WS + 置成功态。"""
     try:
-        is_new, msg = await _save_and_start(
+        is_new, msg, tasks_started = await _save_and_start(
             account_id=account_id, account=account, password=password,
             show_browser=show_browser, owner_id=owner_id,
             cookies_str=cookies_str, unb=unb,
@@ -339,4 +344,5 @@ async def _finish_success(
     session["status"] = "success"
     session["account_id"] = account_id
     session["is_new_account"] = is_new
+    session["tasks_started"] = tasks_started
     session["message"] = msg

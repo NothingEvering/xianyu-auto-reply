@@ -274,6 +274,11 @@ class DatabaseInitializer:
             "账号密码登录模式：protocol/browser",
         ),
         (
+            "account.login_save_only",
+            "true",
+            "仅保存登录：登录和导入只保存凭据，账号保持禁用，不启动自动任务",
+        ),
+        (
             "captcha.real_mouse_weight_local",
             "1",
             "real_mouse过滑块本地排队权重",

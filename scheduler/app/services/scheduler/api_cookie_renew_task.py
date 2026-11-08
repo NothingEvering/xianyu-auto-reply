@@ -73,7 +73,10 @@ class ApiCookieRenewTaskService:
         processed_count = 0
 
         try:
+            from common.login_save_only import auto_enable_after_refresh_allowed, read_login_save_only
+
             async with async_session_maker() as session:
+                save_only = await read_login_save_only(session)
                 # 主动清理过期的接口续期日志（10天前）
                 await self._cleanup_expired_logs(session)
 
@@ -103,11 +106,19 @@ class ApiCookieRenewTaskService:
 
                         await self._log_result(session, batch_id, account.account_id, result)
 
-                        # 续期成功后重新读取账号最新状态，若期间被并发改为禁用则自动启用
+                        # 续期成功后若账号已被改为禁用，仅在关闭仅保存登录时才自动启用。
                         if result.status in ("success", "cookie_updated", "browser_renewed"):
                             await session.refresh(account)
-                            if self._is_disabled_account(account):
+                            if (
+                                self._is_disabled_account(account)
+                                and auto_enable_after_refresh_allowed(save_only=save_only)
+                            ):
                                 await self._enable_account_after_renew(session, account)
+                            elif self._is_disabled_account(account):
+                                logger.info(
+                                    f"【{self.task_name}】仅保存登录：账号 {account.account_id} "
+                                    "保持禁用，不启动任务"
+                                )
                     except Exception as exc:
                         await session.rollback()
                         failed_count += 1

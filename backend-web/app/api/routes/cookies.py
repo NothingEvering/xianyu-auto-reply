@@ -426,13 +426,15 @@ async def _update_account_status_and_task(
         return True, None
 
     from app.services.websocket_client import websocket_client
+    from common.login_save_only import explicit_enable_task_action
 
     original_disable_reason = account.disable_reason
     await account_service.update_status(
         account, enabled, disable_reason="手动禁用" if not enabled else None
     )
 
-    if enabled:
+    action = explicit_enable_task_action(enabled)
+    if action == "start":
         task_result = await websocket_client.start_account(account.account_id, account.cookie or "", account.owner_id)
     else:
         task_result = await websocket_client.stop_account(account.account_id)
@@ -468,12 +470,21 @@ async def create_account(
 ) -> ApiResponse:
     try:
         account = await account_service.create_account(current_user.id, payload.id, payload.value)
-        
-        # 启动WebSocket任务（通过HTTP调用WebSocket服务）
-        from app.services.websocket_client import websocket_client
-        task_result = await websocket_client.start_account(account.account_id, account.cookie or "", account.owner_id)
-        if isinstance(task_result, dict) and not task_result.get("success", True):
+
+        from app.services.login_task_dispatch import dispatch_login_task
+        from common.login_save_only import task_action_after_login
+
+        action = task_action_after_login(status=account.status, created=True)
+        task_result = await dispatch_login_task(
+            account.account_id,
+            action,
+            cookie=account.cookie or "",
+            user_id=account.owner_id,
+        )
+        if action == "start" and isinstance(task_result, dict) and not task_result.get("success", True):
             return ApiResponse(success=False, message=task_result.get("message") or "账号已添加，但启动任务失败")
+        if action == "none":
+            return ApiResponse(success=True, message="账号已保存，未启用自动任务")
         
     except ValueError as exc:
         return ApiResponse(success=False, message=str(exc))
@@ -491,8 +502,13 @@ async def update_account_cookie(
 ) -> ApiResponse:
     account = await _get_account_or_404(current_user, account_id, account_service)
     await account_service.update_cookie(account, payload.value)
-    
-    # 更新Cookie并重启WebSocket任务（通过HTTP调用WebSocket服务）
+
+    from common.login_save_only import read_login_save_only
+
+    if await read_login_save_only(account_service.session):
+        return ApiResponse(success=True, message="Cookie 已保存，未重启账号任务")
+
+    # 关闭仅保存登录后，更新 Cookie 仍重启 WebSocket 任务
     from app.services.websocket_client import websocket_client
     await websocket_client.restart_account(account_id)
     
@@ -1066,13 +1082,17 @@ async def renew_account_login(
     from common.services.cookie_renew_api_service import cookie_renew_api_service
     from sqlalchemy import select
 
+    from common.login_save_only import read_login_save_only
+
     owner_id, is_admin = resolve_owner_scope(current_user)
+    save_only = True
 
     results = []
     success_count = 0
     failed_count = 0
 
     async with async_session_maker() as session:
+        save_only = await read_login_save_only(session)
         for account_id in account_ids:
             try:
                 # 获取账号信息（通过 account_id 字符串）
@@ -1111,19 +1131,19 @@ async def renew_account_login(
                     failed_count += 1
                     continue
 
-                # 续期成功，自动启用账号
-                if account.status != "active":
-                    account.status = "active"
-                    account.disable_reason = None
-                    await session.commit()
+                # 仅保存登录时保留当前状态，不因续期成功改回启用或启动任务。
+                if not save_only:
+                    if account.status != "active":
+                        account.status = "active"
+                        account.disable_reason = None
+                        await session.commit()
 
-                # 通知 WebSocket 服务启动/重启账号任务
-                try:
-                    from app.services.websocket_client import websocket_client
-                    await websocket_client.start_account(account.account_id, renew_result.new_cookies_str or cookies_str, account.owner_id)
-                except Exception as ws_e:
-                    from loguru import logger
-                    logger.warning(f"账号 {account.account_id} 续期成功但启动WebSocket任务失败: {ws_e}")
+                    try:
+                        from app.services.websocket_client import websocket_client
+                        await websocket_client.start_account(account.account_id, renew_result.new_cookies_str or cookies_str, account.owner_id)
+                    except Exception as ws_e:
+                        from loguru import logger
+                        logger.warning(f"账号 {account.account_id} 续期成功但启动WebSocket任务失败: {ws_e}")
 
                 if renew_result.updated_cookie_names:
                     results.append({
