@@ -6,9 +6,32 @@ FROM python:3.11-slim
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# 配置国内镜像源
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null || true
+# 默认保留基础镜像中的 Debian 软件源和 Signed-By 签名校验。
+# 官方源不可达时才覆盖主机名，例如 --build-arg APT_MIRROR=mirrors.ustc.edu.cn。
+# 只接受主机名，不接受 trusted=yes 或其它 apt 选项。
+ARG APT_MIRROR=
+RUN set -eu; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      case "${APT_MIRROR}" in \
+        *[!A-Za-z0-9.-]*|-*|*-|*..*|.*) \
+          echo "APT_MIRROR must be a hostname, not an apt option" >&2; \
+          exit 1 ;; \
+      esac; \
+      changed=0; \
+      for sources in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        if [ -f "${sources}" ]; then \
+          sed -i \
+            -e "s|https://deb.debian.org|https://${APT_MIRROR}|g" \
+            -e "s|http://deb.debian.org|http://${APT_MIRROR}|g" \
+            "${sources}"; \
+          changed=1; \
+        fi; \
+      done; \
+      if [ "${changed}" -ne 1 ]; then \
+        echo "Debian apt source file not found" >&2; \
+        exit 1; \
+      fi; \
+    fi
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /app
