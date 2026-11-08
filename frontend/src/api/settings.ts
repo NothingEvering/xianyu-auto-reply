@@ -63,7 +63,7 @@ const AUTH_FOOTER_AD_SETTING_KEYS: Array<keyof AuthFooterAdSettings> = [
   'auth.footer_ad_html',
 ]
 
-const BOOLEAN_SYSTEM_SETTING_KEYS = ['registration_enabled', 'show_default_login_info', 'login_captcha_enabled', 'smtp_use_tls', 'smtp_use_ssl', 'runtime.is_exe_mode', 'account.face_verify_timeout_disable', 'proxy.enabled']
+const BOOLEAN_SYSTEM_SETTING_KEYS = ['registration_enabled', 'show_default_login_info', 'login_captcha_enabled', 'smtp_use_tls', 'smtp_use_ssl', 'runtime.is_exe_mode', 'account.face_verify_timeout_disable', 'account.login_save_only', 'proxy.enabled']
 
 export const LOGIN_BRANDING_UPDATED_EVENT = 'login-branding-updated'
 

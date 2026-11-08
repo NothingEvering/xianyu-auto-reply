@@ -119,6 +119,7 @@ class PasswordLoginManager:
             "message": session.get("message"),
             "account_id": session.get("account_id"),
             "is_new_account": session.get("is_new_account"),
+            "tasks_started": session.get("tasks_started"),
             "fallback_session_id": session.get("fallback_session_id"),
         }
         # 终态会话不立即删除：首次读到终态时打宽限时间戳，宽限期内并发/重复轮询仍能

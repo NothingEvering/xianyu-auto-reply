@@ -4,7 +4,7 @@
 功能：
 1. 管理员创建共享会话，生成可分享的链接
 2. 兼职人员通过链接加入会话，各自获取独立的闲鱼二维码
-3. 兼职轮询自己的扫码状态，成功后自动保存Cookie并启动账号任务
+3. 兼职轮询自己的扫码状态，成功后保存Cookie；仅保存登录开启时不启动任务
 4. 管理员实时查看所有兼职的扫码状态
 """
 from __future__ import annotations
@@ -22,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api import deps
 from app.api.deps import get_db_session as get_db
 from app.core.config import get_settings
-from app.core.http_client import get_http_client
 from app.services.account_service import AccountService
 from app.services.qr_login import qr_login_manager
 from common.models.shared_scan_session import SharedScanSession
@@ -588,19 +587,23 @@ async def _handle_scan_success(
         PROCESSED_WORKERS[sub_session_id] = processed_info
         PART_TIME_SESSIONS.pop(sub_session_id, None)
 
-        try:
-            settings = get_settings()
-            client = get_http_client()
-            endpoint = "start" if is_new else "restart"
-            response = await client.post(
-                f"{settings.websocket_service_url}/internal/accounts/{account.account_id}/{endpoint}",
-                json={"cookie_value": cookies_str, "user_id": owner_id},
+        from app.services.login_task_dispatch import dispatch_login_task
+        from common.login_save_only import task_action_after_login
+
+        action = task_action_after_login(status=account.status, created=is_new)
+        response = await dispatch_login_task(
+            account.account_id,
+            action,
+            cookie=cookies_str,
+            user_id=owner_id,
+        )
+        if action == "none":
+            logger.info(f"共享扫码登录：账号已保存且保持禁用 {account.account_id}")
+        elif response.get("success"):
+            logger.info(f"共享扫码登录：账号任务{action}完成 {account.account_id}")
+        else:
+            logger.warning(
+                f"共享扫码登录：账号任务{action}失败 {account.account_id}: {response.get('message')}"
             )
-            if response.get("success"):
-                logger.info(f"共享扫码登录：账号 WebSocket 任务已{'启动' if is_new else '重启'} {account.account_id}")
-            else:
-                logger.warning(f"共享扫码登录：WebSocket 任务操作失败 {account.account_id}: {response.get('message')}")
-        except Exception as ws_e:
-            logger.error(f"共享扫码登录：调用 WebSocket 服务失败 {account.account_id}: {ws_e}")
 
     return processed_info

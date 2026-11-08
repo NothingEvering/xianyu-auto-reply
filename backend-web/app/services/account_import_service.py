@@ -125,6 +125,9 @@ class AccountImportService:
                 "data": None,
             }
 
+        from common.login_save_only import read_login_save_only
+
+        self.save_only = await read_login_save_only(self.session)
         try:
             # 按顺序导入各Sheet
             await self._import_accounts_basic(wb, enable_all)
@@ -139,14 +142,17 @@ class AccountImportService:
             await self._import_confirm_receipt(wb)
             await self._import_auto_rate(wb)
 
-            # 启动需要启用的账号
-            accounts_to_start = await self._get_accounts_to_start(enable_all)
-            for account_id, cookie in accounts_to_start:
-                try:
-                    await self._start_account(account_id, cookie)
-                    self.started += 1
-                except Exception as e:
-                    self.errors.append(f"账号 {account_id} 启动失败: {str(e)}")
+            if self.save_only:
+                logger.info("仅保存登录：导入的账号保持禁用，不启动任务")
+            else:
+                # 启动需要启用的账号
+                accounts_to_start = await self._get_accounts_to_start(enable_all)
+                for account_id, cookie in accounts_to_start:
+                    try:
+                        await self._start_account(account_id, cookie)
+                        self.started += 1
+                    except Exception as e:
+                        self.errors.append(f"账号 {account_id} 启动失败: {str(e)}")
 
         except Exception as e:
             logger.error(f"导入过程异常: {e}")
@@ -184,10 +190,7 @@ class AccountImportService:
                 self.failed += 1
                 continue
 
-            # 确定状态
-            status = _parse_str(row.get("状态")) or "active"
-            if enable_all:
-                status = "active"
+            from common.login_save_only import resolve_imported_account_state
 
             # 查询是否已存在
             stmt = select(XYAccount).where(
@@ -197,8 +200,18 @@ class AccountImportService:
             result = await self.session.execute(stmt)
             existing = result.scalars().first()
 
+            save_only = bool(getattr(self, "save_only", True))
+            status, reason, metadata, clear_reason = resolve_imported_account_state(
+                save_only=save_only,
+                sheet_status=_parse_str(row.get("状态")),
+                enable_all=enable_all,
+                previous_status=existing.status if existing else None,
+                previous_disable_reason=existing.disable_reason if existing else None,
+                metadata=existing.metadata_json if existing else None,
+            )
+
             if existing:
-                # 更新
+                # 更新。仅保存登录时表格里的 active 不能覆盖禁用状态。
                 existing.cookie = cookie
                 existing.status = status
                 existing.remark = _parse_str(row.get("备注")) or existing.remark
@@ -212,7 +225,10 @@ class AccountImportService:
                 existing.proxy_port = _parse_int(row.get("代理端口"), existing.proxy_port or 0) or None
                 existing.proxy_user = _parse_str(row.get("代理用户名")) or existing.proxy_user
                 existing.proxy_pass = _parse_str(row.get("代理密码")) or existing.proxy_pass
-                if enable_all:
+                if save_only:
+                    existing.disable_reason = reason
+                    existing.metadata_json = metadata
+                elif clear_reason:
                     existing.disable_reason = None
                 self.session.add(existing)
                 self._account_id_to_pk[account_id] = existing.id
@@ -232,6 +248,8 @@ class AccountImportService:
                     cookie=cookie,
                     login_method="import",
                     status=status,
+                    disable_reason=reason if save_only else None,
+                    metadata_json=metadata if save_only else None,
                     remark=_parse_str(row.get("备注")),
                     username=_parse_str(row.get("用户名")),
                     login_password=_parse_str(row.get("登录密码")),

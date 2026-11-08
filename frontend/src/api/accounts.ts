@@ -381,6 +381,8 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
   account_info?: {
     account_id: string
     is_new_account: boolean
+    status?: string
+    tasks_started?: boolean
   }
 }> => {
   const result = await get<{
@@ -391,7 +393,7 @@ export const checkQRLoginStatus = async (sessionId: string): Promise<{
       message?: string
       face_qr_url?: string
       verification_url?: string
-      account_info?: { account_id: string; is_new_account: boolean }
+      account_info?: { account_id: string; is_new_account: boolean; status?: string; tasks_started?: boolean }
     }
   }>(`${QR_LOGIN_PREFIX}/status/${sessionId}`)
   // 从标准ApiResponse格式中提取数据
@@ -413,6 +415,7 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
   message?: string
   account_id?: string
   is_new_account?: boolean
+  tasks_started?: boolean
   cookie_count?: number
   verification_url?: string
   screenshot_path?: string
@@ -425,6 +428,7 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
     message?: string
     account_id?: string
     is_new_account?: boolean
+    tasks_started?: boolean
     cookie_count?: number
     verification_url?: string
     screenshot_path?: string
@@ -437,6 +441,7 @@ export const checkPasswordLoginStatus = async (sessionId: string): Promise<{
     message: result.message,
     account_id: result.account_id,
     is_new_account: result.is_new_account,
+    tasks_started: result.tasks_started,
     cookie_count: result.cookie_count,
     verification_url: result.verification_url,
     screenshot_path: result.screenshot_path,

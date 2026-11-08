@@ -80,6 +80,7 @@ export function useSettingsActions(getSettings: SettingsGetter) {
         login_captcha_enabled: Boolean(settings.login_captcha_enabled ?? true),
         'log.retention_days': String(value),
         'account.face_verify_timeout_disable': Boolean(settings['account.face_verify_timeout_disable'] ?? true),
+        'account.login_save_only': Boolean(settings['account.login_save_only'] ?? true),
       }, '基础设置保存成功', '基础设置保存失败')
     })
   }, [addToast, getSettings, persist, run])

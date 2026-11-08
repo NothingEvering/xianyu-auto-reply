@@ -601,7 +601,9 @@ export function Accounts() {
             clearQrCheck()
             addToast({
               type: 'success',
-              message: result.account_info?.is_new_account
+              message: result.account_info?.tasks_started === false
+                ? `账号 ${result.account_info.account_id || ''} 已保存，尚未启用，不会自动发消息`.trim()
+                : result.account_info?.is_new_account
                 ? `新账号 ${result.account_info.account_id} 添加成功`
                 : result.account_info?.account_id
                   ? `账号 ${result.account_info.account_id} 登录成功`
@@ -700,7 +702,9 @@ export function Accounts() {
             setPwdSessionId('')
             addToast({
               type: 'success',
-              message: result.is_new_account
+              message: result.tasks_started === false
+                ? `账号 ${result.account_id} 已保存，尚未启用，不会自动发消息`
+                : result.is_new_account
                 ? `新账号 ${result.account_id} 添加成功`
                 : `账号 ${result.account_id} 登录成功`,
             })
