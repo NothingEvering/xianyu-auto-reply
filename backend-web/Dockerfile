@@ -32,7 +32,20 @@ RUN set -eu; \
         exit 1; \
       fi; \
     fi
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+# 留空则使用 pip 默认的 https://pypi.org/simple，保留 TLS 校验，不设置 trusted-host。
+# 只有官方源不可达时才覆盖，例如 --build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=
+RUN set -eu; \
+    if [ -n "${PIP_INDEX_URL}" ]; then \
+      case "${PIP_INDEX_URL}" in \
+        https://*) ;; \
+        *) echo "PIP_INDEX_URL must use https" >&2; exit 1 ;; \
+      esac; \
+      case "${PIP_INDEX_URL}" in \
+        *trusted-host*|*trusted_host*) echo "PIP_INDEX_URL must not disable TLS trust" >&2; exit 1 ;; \
+      esac; \
+      pip config set global.index-url "${PIP_INDEX_URL}"; \
+    fi
 
 WORKDIR /app
 
