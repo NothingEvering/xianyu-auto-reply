@@ -20,6 +20,8 @@ def test_python_images_keep_debian_signature_verification():
         assert "--allow-unauthenticated" not in text.lower()
         assert "allowinsecure" not in text.lower()
         assert "APT_MIRROR must be a hostname" in text
+        assert 'Acquire::EnableSrvRecords "false";' in text
+        assert "AllowInsecureRepositories" not in text
         sed_command = text.split("sed -i", 1)[1].split("RUN pip", 1)[0]
         assert "Signed-By" not in sed_command
         assert "trusted" not in sed_command.lower()
