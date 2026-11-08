@@ -22,6 +22,10 @@ def test_python_images_keep_debian_signature_verification():
         assert "APT_MIRROR must be a hostname" in text
         assert 'Acquire::EnableSrvRecords "false";' in text
         assert "AllowInsecureRepositories" not in text
-        sed_command = text.split("sed -i", 1)[1].split("RUN pip", 1)[0]
+        assert "pypi.tuna.tsinghua.edu.cn" not in text
+        assert "PIP_INDEX_URL must use https" in text
+        assert "--trusted-host" not in text
+        assert "must not disable TLS trust" in text
+        sed_command = text.split("sed -i", 1)[1].split("\n    fi", 1)[0]
         assert "Signed-By" not in sed_command
         assert "trusted" not in sed_command.lower()
